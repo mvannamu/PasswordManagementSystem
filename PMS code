@@ -1,0 +1,228 @@
+import secrets
+import hashlib
+import sqlite3
+import requests
+from datetime import datetime
+from cryptography.fernet import Fernet
+
+# Initialize SQLite database
+conn = sqlite3.connect("password_manager.db")
+cursor = conn.cursor()
+
+# Create tables to store passwords
+cursor.execute('''
+CREATE TABLE IF NOT EXISTS passwords (
+    id INTEGER PRIMARY KEY,
+    username TEXT NOT NULL,
+    hashed_password TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    policy TEXT NOT NULL
+)
+''')
+conn.commit()
+
+# Password Policy
+DEFAULT_POLICY = {
+    "min_length": 12,
+    "include_uppercase": True,
+    "include_numbers": True,
+    "include_symbols": True
+}
+
+# Function to generate a password
+def generate_password(length=12, include_uppercase=True, include_numbers=True, include_symbols=True):
+    characters = "abcdefghijklmnopqrstuvwxyz"
+    if include_uppercase:
+        characters += "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    if include_numbers:
+        characters += "1234567890"
+    if include_symbols:
+        characters += "!@#$%^&*()-_+=<>?/"
+
+    return ''.join(secrets.choice(characters) for _ in range(length))
+
+# Function to hash a password
+def hash_password(password):
+    return hashlib.sha256(password.encode()).hexdigest()
+
+# Function to validate a password
+def validate_password(password, policy):
+    if len(password) < policy.get("min_length", 12):
+        return False, "Password is too short"
+    if policy.get("include_uppercase") and not any(c.isupper() for c in password):
+        return False, "Password must include at least one uppercase letter"
+    if policy.get("include_numbers") and not any(c.isdigit() for c in password):
+        return False, "Password must include at least one number"
+    if policy.get("include_symbols") and not any(c in "!@#$%^&*()-_+=<>?/" for c in password):
+        return False, "Password must include at least one symbol"
+    return True, "Password is valid"
+
+# Function to verify a password against a given policy
+def verify_password_policy(password, policy):
+    is_valid, message = validate_password(password, policy)
+    if is_valid:
+        return True, "Password meets the policy requirements"
+    else:
+        return False, message
+
+# Function to store a password in the database
+def store_password(username, password, policy):
+    hashed_password = hash_password(password)
+    created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    cursor.execute('''
+        INSERT INTO passwords (username, hashed_password, created_at, policy)
+        VALUES (?, ?, ?, ?)
+    ''', (username, hashed_password, created_at, str(policy)))
+    conn.commit()
+    return "Password stored successfully"
+
+# Function to bulk generate passwords
+def generate_bulk_passwords(count, policy):
+    passwords = []
+    for _ in range(count):
+        password = generate_password(
+            length=policy.get("min_length", 12),
+            include_uppercase=policy.get("include_uppercase", True),
+            include_numbers=policy.get("include_numbers", True),
+            include_symbols=policy.get("include_symbols", True)
+        )
+        passwords.append(password)
+    return passwords
+
+# Function to retrieve passwords from the database
+def retrieve_passwords():
+    cursor.execute("SELECT username, hashed_password, created_at, policy FROM passwords")
+    return cursor.fetchall()
+
+# Function to check if a password exists for a username
+def check_password(username, password):
+    hashed_password = hash_password(password)
+    cursor.execute("SELECT hashed_password FROM passwords WHERE username = ?", (username,))
+    result = cursor.fetchone()
+    if result and result[0] == hashed_password:
+        return True, "Password is correct"
+    return False, "Password is incorrect"
+
+# Function to reset a password
+def reset_password(username, old_password, new_password, policy):
+    is_correct, message = check_password(username, old_password)
+    if not is_correct:
+        return "Old password is incorrect"
+
+    is_valid, validation_message = validate_password(new_password, policy)
+    if not is_valid:
+        return f"New password validation failed: {validation_message}"
+
+    hashed_new_password = hash_password(new_password)
+    cursor.execute("UPDATE passwords SET hashed_password = ?, created_at = ? WHERE username = ?", 
+                   (hashed_new_password, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), username))
+    conn.commit()
+    return "Password reset successfully"
+
+# Function to integrate with Have I Been Pwned API
+def check_password_breach(password):
+    sha1_hash = hashlib.sha1(password.encode()).hexdigest().upper()
+    prefix, suffix = sha1_hash[:5], sha1_hash[5:]
+    response = requests.get(f"https://api.pwnedpasswords.com/range/{prefix}")
+    if response.status_code == 200:
+        hashes = (line.split(":") for line in response.text.splitlines())
+        for h, count in hashes:
+            if h == suffix:
+                return True, f"Password has been breached {count} times"
+        return False, "Password is safe"
+    else:
+        return False, "Error checking password breach"
+
+# Main execution
+if __name__ == "__main__":
+    print("Welcome to the Secure Password Manager!")
+
+    while True:
+        print("\nOptions:")
+        print("1. Generate a Password")
+        print("2. Validate a Password")
+        print("3. Store a Password")
+        print("4. Bulk Generate Passwords")
+        print("5. Retrieve Stored Passwords")
+        print("6. Check Password")
+        print("7. Check Password Breach")
+        print("8. Verify Password Policy")
+        print("9. Reset Password")
+        print("10. Exit")
+
+        choice = input("Choose an option: ")
+
+        if choice == "1":
+            print("\nPassword Generation")
+            length = int(input("Enter password length (default 12): ") or 12)
+            include_uppercase = input("Include uppercase letters? (y/n, default y): ").lower() != "n"
+            include_numbers = input("Include numbers? (y/n, default y): ").lower() != "n"
+            include_symbols = input("Include symbols? (y/n, default y): ").lower() != "n"
+
+            password = generate_password(length, include_uppercase, include_numbers, include_symbols)
+            print(f"Generated Password: {password}")
+
+        elif choice == "2":
+            print("\nPassword Validation")
+            password = input("Enter the password to validate: ")
+            is_valid, message = validate_password(password, DEFAULT_POLICY)
+            print(message)
+
+        elif choice == "3":
+            print("\nStore a Password")
+            username = input("Enter username: ")
+            password = input("Enter password: ")
+            message = store_password(username, password, DEFAULT_POLICY)
+            print(message)
+
+        elif choice == "4":
+            print("\nBulk Password Generation")
+            count = int(input("Enter the number of passwords to generate: "))
+            passwords = generate_bulk_passwords(count, DEFAULT_POLICY)
+            print("Generated Passwords:")
+            for pwd in passwords:
+                print(pwd)
+
+        elif choice == "5":
+            print("\nRetrieve Stored Passwords")
+            passwords = retrieve_passwords()
+            for username, hashed_password, created_at, policy in passwords:
+                print(f"Username: {username}, Hashed Password: {hashed_password}, Created At: {created_at}, Policy: {policy}")
+
+        elif choice == "6":
+            print("\nCheck Password")
+            username = input("Enter username: ")
+            password = input("Enter password: ")
+            is_correct, message = check_password(username, password)
+            print(message)
+
+        elif choice == "7":
+            print("\nCheck Password Breach")
+            password = input("Enter password: ")
+            is_breached, message = check_password_breach(password)
+            print(message)
+
+        elif choice == "8":
+            print("\nVerify Password Policy")
+            password = input("Enter the password to verify: ")
+            is_valid, message = verify_password_policy(password, DEFAULT_POLICY)
+            print(message)
+
+        elif choice == "9":
+            print("\nReset Password")
+            username = input("Enter username: ")
+            old_password = input("Enter old password: ")
+            new_password = input("Enter new password: ")
+            message = reset_password(username, old_password, new_password, DEFAULT_POLICY)
+            print(message)
+
+        elif choice == "10":
+            print("Exiting Password Manager. Goodbye!")
+            break
+
+        else:
+            print("Invalid choice. Please try again.")
+
+# Close the database connection
+conn.close()
+
